@@ -1,0 +1,159 @@
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { AckPolicy, Codec, DeliverPolicy } from 'nats';
+import { NatsService } from '../nats/nats.service';
+import { EventsService } from './events.service';
+import { PrometheusService } from '../prometheus/prometheus.service';
+import { Event } from '../types/events.types';
+import { ConfigService } from '@nestjs/config';
+
+const FETCH_EXPIRES_MS = 5000;
+const ACK_WAIT_NANOS = 30_000_000_000;
+const METRICS_INTERVAL_MS = 10000;
+
+@Injectable()
+export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
+    private readonly logger = new Logger(EventsConsumer.name);
+    private running = true;
+    private readonly batchSize: number;
+    private metricsInterval?: NodeJS.Timeout;
+
+    constructor(
+        private readonly natsService: NatsService,
+        private readonly eventsService: EventsService,
+        private readonly prometheus: PrometheusService,
+        private readonly configService: ConfigService,
+    ) {
+        this.batchSize = this.configService.get<number>('NATS_BATCH_SIZE', 100);
+    }
+
+    async onModuleInit() {
+        this.logger.log('Starting NATS event consumer');
+        this.startConsumer();
+    }
+
+    async onModuleDestroy() {
+        this.logger.log('Shutting down event consumer');
+        this.running = false;
+
+        if (this.metricsInterval) {
+            clearInterval(this.metricsInterval);
+        }
+    }
+
+    private async ensureConsumerExists() {
+        try {
+            const streamName = this.configService.get('NATS_STREAM', 'EVENTS');
+            const prefix = this.configService.get('NATS_SUBJECT_PREFIX', 'events');
+
+            const connection = this.natsService.getConnection();
+            const jsm = await connection.jetstreamManager();
+
+            await jsm.consumers.add(streamName, {
+                durable_name: 'event-processor',
+                ack_policy: AckPolicy.Explicit,
+                max_ack_pending: 200,
+                max_deliver: 5,
+                deliver_policy: DeliverPolicy.All,
+                filter_subject: `${prefix}.>`,
+                ack_wait: ACK_WAIT_NANOS,
+            });
+
+            this.logger.log('Consumer ensured');
+        } catch (error) {
+            if (!error.message?.includes('already exists')) {
+                this.logger.error(`Failed to ensure consumer: ${error.message}`);
+                throw error;
+            }
+        }
+    }
+
+    private async startConsumer() {
+        try {
+            await this.ensureConsumerExists();
+
+            const streamName = this.configService.get('NATS_STREAM', 'EVENTS');
+            const jetstream = this.natsService.getJetStream();
+            const codec = this.natsService.getJsonCodec();
+            const consumer = await jetstream.consumers.get(streamName, 'event-processor');
+
+            this.logger.log('Started pull-based consumer');
+
+            this.monitorConsumerMetrics(consumer);
+            this.processInBatches(consumer, codec);
+        } catch (error) {
+            this.logger.error(`Failed to start consumer: ${error.message}`, error.stack);
+        }
+    }
+
+    private monitorConsumerMetrics(consumer: any) {
+        this.metricsInterval = setInterval(async () => {
+            if (!this.running) {
+                return;
+            }
+
+            try {
+                const info = await consumer.info();
+                this.prometheus.setConsumerPending(info.num_pending);
+                this.prometheus.setConsumerAckPending(info.num_ack_pending);
+            } catch (error) {
+                this.logger.error(`Failed to get consumer info: ${error.message}`);
+            }
+        }, METRICS_INTERVAL_MS);
+    }
+
+    private async processInBatches(consumer: any, codec: Codec<unknown>) {
+        while (this.running) {
+            try {
+                const messages = await consumer.fetch({
+                    max_messages: this.batchSize,
+                    expires: FETCH_EXPIRES_MS,
+                });
+
+                for await (const msg of messages) {
+                    await this.processMessage(msg, codec);
+                }
+            } catch (error) {
+                this.handleFetchError(error);
+            }
+        }
+    }
+
+    private async processMessage(msg: any, codec: Codec<unknown>) {
+        let event: Event | null = null;
+
+        try {
+            event = codec.decode(msg.data) as Event;
+            await this.eventsService.saveEvent(event);
+
+            msg.ack();
+            this.prometheus.incrementEventsProcessed(event.source);
+        } catch (error) {
+            if (error.code === '23505') {
+                msg.ack();
+                if (event) {
+                    this.prometheus.incrementEventsDuplicate(event.source);
+                }
+                return;
+            }
+
+            msg.nak();
+            if (event) {
+                this.prometheus.incrementEventsFailed(event.source, 'db_error');
+            }
+
+            this.logger.error(`Error processing event: ${error.message}`);
+        }
+    }
+
+    private async handleFetchError(error: any) {
+        if (!error.message?.includes('timeout') && !error.message?.includes('no messages')) {
+            this.logger.error(`Batch fetch error: ${error.message}`);
+        }
+
+        await this.sleep(1000);
+    }
+
+    private sleep(ms: number) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+}

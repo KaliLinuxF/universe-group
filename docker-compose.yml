@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: events-postgres
+    environment:
+      POSTGRES_DB: events_db
+      POSTGRES_USER: events_user
+      POSTGRES_PASSWORD: events_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U events_user -d events_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - events-network
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: events-nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: "--http_port 8222 --js"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - events-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: events-app
+    environment:
+      NODE_ENV: production
+      DB_LOGGING: false
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: events_db
+      DATABASE_USER: events_user
+      DATABASE_PASSWORD: events_pass
+      NATS_URL: nats://nats:4222
+      PORT: 3000
+      NATS_STREAM: EVENTS
+      NATS_SUBJECT_PREFIX: events
+      NATS_BATCH_SIZE: 100
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - events-network
+    restart: unless-stopped
+
+  publisher:
+    image: andriiuni/events
+    container_name: events-publisher
+    environment:
+      EVENT_ENDPOINT: http://app:3000/webhook
+    depends_on:
+      - app
+    networks:
+      - events-network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: events-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - events-network
+    restart: unless-stopped
+
+networks:
+  events-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  prometheus_data:
