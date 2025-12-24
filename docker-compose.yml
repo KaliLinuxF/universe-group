@@ -50,7 +50,8 @@ services:
       PORT: 3000
       NATS_STREAM: EVENTS
       NATS_SUBJECT_PREFIX: events
-      NATS_BATCH_SIZE: 100
+      NATS_BATCH_SIZE: 500
+      NATS_CONCURRENCY: 100
     ports:
       - "3000:3000"
     depends_on:

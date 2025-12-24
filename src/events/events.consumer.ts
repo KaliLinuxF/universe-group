@@ -5,6 +5,7 @@ import { EventsService } from './events.service';
 import { PrometheusService } from '../prometheus/prometheus.service';
 import { Event } from '../types/events.types';
 import { ConfigService } from '@nestjs/config';
+import pLimit from 'p-limit';
 
 const FETCH_EXPIRES_MS = 5000;
 const ACK_WAIT_NANOS = 30_000_000_000;
@@ -15,6 +16,7 @@ export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(EventsConsumer.name);
     private running = true;
     private readonly batchSize: number;
+    private readonly concurrency: number;
     private metricsInterval?: NodeJS.Timeout;
 
     constructor(
@@ -23,7 +25,8 @@ export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
         private readonly prometheus: PrometheusService,
         private readonly configService: ConfigService,
     ) {
-        this.batchSize = this.configService.get<number>('NATS_BATCH_SIZE', 100);
+        this.batchSize = this.configService.get<number>('NATS_BATCH_SIZE', 500);
+        this.concurrency = this.configService.get<number>('NATS_CONCURRENCY', 50);
     }
 
     async onModuleInit() {
@@ -51,7 +54,7 @@ export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
             await jsm.consumers.add(streamName, {
                 durable_name: 'event-processor',
                 ack_policy: AckPolicy.Explicit,
-                max_ack_pending: 200,
+                max_ack_pending: 10000,
                 max_deliver: 5,
                 deliver_policy: DeliverPolicy.All,
                 filter_subject: `${prefix}.>`,
@@ -109,38 +112,80 @@ export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
                     expires: FETCH_EXPIRES_MS,
                 });
 
+                const messagesToProcess: any[] = [];
+
                 for await (const msg of messages) {
-                    await this.processMessage(msg, codec);
+                    messagesToProcess.push(msg);
                 }
+
+                if (messagesToProcess.length === 0) {
+                    continue;
+                }
+
+                await this.processBatch(messagesToProcess, codec);
             } catch (error) {
                 this.handleFetchError(error);
             }
         }
     }
 
-    private async processMessage(msg: any, codec: Codec<unknown>) {
-        let event: Event | null = null;
+    private async processBatch(messages: any[], codec: Codec<unknown>) {
+        const events: Event[] = [];
+        const messageEventMap = new Map<any, Event>();
+
+        for (const msg of messages) {
+            try {
+                const event = codec.decode(msg.data) as Event;
+                events.push(event);
+                messageEventMap.set(msg, event);
+            } catch (error) {
+                this.logger.error(`Failed to decode message: ${error.message}`);
+                msg.nak();
+            }
+        }
+
+        if (events.length === 0) {
+            return;
+        }
 
         try {
-            event = codec.decode(msg.data) as Event;
-            await this.eventsService.saveEvent(event);
+            const { inserted, duplicates } = await this.eventsService.saveBatch(events);
 
+            for (const [msg, event] of messageEventMap.entries()) {
+                msg.ack();
+                this.prometheus.incrementEventsProcessed(event.source);
+            }
+
+            if (duplicates > 0) {
+                this.logger.log(`Batch: ${inserted} inserted, ${duplicates} duplicates`);
+            }
+        } catch (error) {
+            this.logger.error(`Batch insert failed, falling back to individual processing: ${error.message}`);
+
+            const limit = pLimit(Math.max(1, this.concurrency));
+
+            await Promise.all(
+                Array.from(messageEventMap.entries()).map(([msg, event]) =>
+                    limit(() => this.processMessage(msg, event)),
+                ),
+            );
+        }
+    }
+
+    private async processMessage(msg: any, event: Event) {
+        try {
+            await this.eventsService.saveEvent(event);
             msg.ack();
             this.prometheus.incrementEventsProcessed(event.source);
         } catch (error) {
             if (error.code === '23505') {
                 msg.ack();
-                if (event) {
-                    this.prometheus.incrementEventsDuplicate(event.source);
-                }
+                this.prometheus.incrementEventsDuplicate(event.source);
                 return;
             }
 
             msg.nak();
-            if (event) {
-                this.prometheus.incrementEventsFailed(event.source, 'db_error');
-            }
-
+            this.prometheus.incrementEventsFailed(event.source, 'db_error');
             this.logger.error(`Error processing event: ${error.message}`);
         }
     }
