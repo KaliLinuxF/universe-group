@@ -19,6 +19,11 @@ export class WebhookService {
             await this.eventPublisher.publish(event);
             this.prometheus.incrementEventsPublished(event.source, event.funnelStage);
         } catch (error) {
+            if (error.message?.includes('TIMEOUT')) {
+                this.prometheus.incrementEventsFailed(event.source, 'timeout');
+                return;
+            }
+            
             this.prometheus.incrementEventsFailed(event.source, 'publish_error');
             this.logger.error(`Failed to publish event ${event.eventId}: ${error.message}`);
         }

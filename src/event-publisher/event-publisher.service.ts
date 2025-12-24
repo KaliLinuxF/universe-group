@@ -12,7 +12,7 @@ export class EventPublisherService {
 
     async publish(event: BaseEventDto): Promise<void> {
         const prefix = this.configService.get('NATS_SUBJECT_PREFIX', 'events');
-        const subject = `${prefix}.${event.version}.${event.source}.${event.funnelStage}`;
+        const subject = `${prefix}.${event.source}.${event.funnelStage}`;
         await this.natsService.publishEvent(subject, event);
     }
 }

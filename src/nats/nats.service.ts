@@ -64,18 +64,10 @@ export class NatsService implements OnModuleInit, OnModuleDestroy {
         }
     }
 
-    /**
-     * JetStream used for at-least-once delivery.
-     * Ack on the consumer side.
-     */
+    // Ack on consumer side
     async publishEvent(subject: string, data: any): Promise<void> {
-        try {
-            const payload = this.jsonCodec.encode(data);
-            this.jetstream.publish(subject, payload);
-        } catch (error) {
-            this.logger.error(`Failed to publish to ${subject}: ${error.message}`);
-            throw error;
-        }
+        const payload = this.jsonCodec.encode(data);
+        await this.jetstream.publish(subject, payload);
     }
 
     getJetStream(): JetStreamClient {

@@ -2,9 +2,6 @@ import { MigrationInterface, QueryRunner, Table, TableIndex } from 'typeorm';
 
 export class CreateEventsTables1703260000000 implements MigrationInterface {
     public async up(queryRunner: QueryRunner): Promise<void> {
-        // Enable UUID extension
-        await queryRunner.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
-
         // Create events table
         await queryRunner.createTable(
             new Table({
@@ -12,7 +9,7 @@ export class CreateEventsTables1703260000000 implements MigrationInterface {
                 columns: [
                     {
                         name: 'eventId',
-                        type: 'uuid',
+                        type: 'text',
                         isPrimary: true,
                     },
                     {

@@ -6,7 +6,7 @@ import { Entity, Column, PrimaryColumn, Index, CreateDateColumn } from 'typeorm'
 @Index(['timestamp'])
 @Index(['eventId'], { unique: true }) // Unique for idempotency
 export class EventEntity {
-    @PrimaryColumn('uuid')
+    @PrimaryColumn('text')
     eventId: string;
 
     @Column({ type: 'timestamp with time zone' })
