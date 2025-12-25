@@ -10,7 +10,7 @@ import { DlqService } from '../dlq/dlq.service';
 
 const FETCH_EXPIRES_MS = 5000;
 const ACK_WAIT_NANOS = 30_000_000_000;
-const METRICS_INTERVAL_MS = 50000;
+const METRICS_INTERVAL_MS = 5000;
 
 @Injectable()
 export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
