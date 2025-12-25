@@ -6,6 +6,7 @@ import { PrometheusService } from '../prometheus/prometheus.service';
 import { Event } from '../types/events.types';
 import { ConfigService } from '@nestjs/config';
 import pLimit from 'p-limit';
+import { DlqService } from '../dlq/dlq.service';
 
 const FETCH_EXPIRES_MS = 5000;
 const ACK_WAIT_NANOS = 30_000_000_000;
@@ -24,6 +25,7 @@ export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
         private readonly eventsService: EventsService,
         private readonly prometheus: PrometheusService,
         private readonly configService: ConfigService,
+        private readonly dlqService: DlqService,
     ) {
         this.batchSize = this.configService.get<number>('NATS_BATCH_SIZE', 500);
         this.concurrency = this.configService.get<number>('NATS_CONCURRENCY', 50);
@@ -192,8 +194,21 @@ export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
                 return;
             }
 
-            msg.nak();
-            this.prometheus.incrementEventsFailed(event.source, 'db_error');
+            const deliveryCount = msg.info?.deliveryCount || 0;
+
+            if (deliveryCount >= 5) {
+                await this.dlqService.send(event, error, deliveryCount);
+                msg.term();
+                this.prometheus.incrementEventsFailed(event.source, 'max_retries_exceeded');
+                this.logger.error(
+                    `Event sent to DLQ after ${deliveryCount} retries: eventId=${event.eventId}, error=${error.message}`,
+                );
+            } else {
+                msg.nak();
+                this.prometheus.incrementEventsFailed(event.source, 'db_error');
+                this.logger.error(`Error processing event (retry ${deliveryCount}/5): ${error.message}`);
+            }
+            
             this.logger.error(`Error processing event: ${error.message}`);
         }
     }
