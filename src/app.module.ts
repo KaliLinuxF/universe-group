@@ -7,6 +7,7 @@ import { EventsModule } from './events/events.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { HealthModule } from './health/health.module';
 import { PrometheusModule } from './prometheus/prometheus.module';
+import { DlqModule } from './dlq/dlq.module';
 
 @Module({
     imports: [
@@ -42,6 +43,7 @@ import { PrometheusModule } from './prometheus/prometheus.module';
 
         TerminusModule,
         PrometheusModule,
+        DlqModule,
         WebhookModule,
         EventsModule,
         AnalyticsModule,

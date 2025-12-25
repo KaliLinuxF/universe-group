@@ -208,8 +208,6 @@ export class EventsConsumer implements OnModuleInit, OnModuleDestroy {
                 this.prometheus.incrementEventsFailed(event.source, 'db_error');
                 this.logger.error(`Error processing event (retry ${deliveryCount}/5): ${error.message}`);
             }
-            
-            this.logger.error(`Error processing event: ${error.message}`);
         }
     }
 
